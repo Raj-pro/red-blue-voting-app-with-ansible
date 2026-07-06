@@ -3,7 +3,7 @@
 # Role: cluster
 # Runs on: ALL nodes (k8s_cluster)
 # Purpose:
-#   Master  → kubeadm init, kubectl config, Calico CNI,
+#   Master  → kubeadm init, kubectl config, Flannel CNI,
 #             generate join command
 #   Workers → kubeadm join using join command from master
 # Key concepts: register, set_fact, hostvars, when, command
@@ -14,7 +14,7 @@
 - name: Check if cluster is already initialised
   ansible.builtin.stat:
     path: /etc/kubernetes/admin.conf
-  register: kubeconfig_stat
+  register: admin_conf_stat
   when: inventory_hostname in groups['k8s_master']
 
 - name: Initialise Kubernetes cluster (master only)
@@ -27,36 +27,56 @@
   register: kubeadm_init
   when:
     - inventory_hostname in groups['k8s_master']
-    - not kubeconfig_stat.stat.exists
-  changed_when: "'Your Kubernetes control-plane has initialized successfully' in kubeadm_init.stdout"
+    - not admin_conf_stat.stat.exists
+  changed_when: kubeadm_init.rc is defined and kubeadm_init.rc == 0
 
-- name: Create .kube directory for ubuntu user (master only)
+- name: Create .kube directory for {{ kube_user }} (master only)
   ansible.builtin.file:
-    path: /home/ubuntu/.kube
+    path: "{{ kubeconfig_path | dirname }}"
     state: directory
-    owner: ubuntu
-    group: ubuntu
+    owner: "{{ kube_user }}"
+    group: "{{ kube_user }}"
     mode: "0755"
   when: inventory_hostname in groups['k8s_master']
 
-- name: Copy admin.conf to ubuntu kubeconfig (master only)
+- name: Copy admin.conf to {{ kube_user }} kubeconfig (master only)
   ansible.builtin.copy:
     src: /etc/kubernetes/admin.conf
-    dest: /home/ubuntu/.kube/config
+    dest: "{{ kubeconfig_path }}"
     remote_src: true
-    owner: ubuntu
-    group: ubuntu
+    owner: "{{ kube_user }}"
+    group: "{{ kube_user }}"
     mode: "0600"
   when: inventory_hostname in groups['k8s_master']
 
-- name: Install Calico CNI network plugin (master only)
-  ansible.builtin.command:
-    cmd: kubectl apply -f {{ calico_manifest_url }}
-  environment:
-    KUBECONFIG: /home/ubuntu/.kube/config
-  register: calico_apply
+- name: Wait for Kubernetes API server to be ready (master only)
+  ansible.builtin.wait_for:
+    host: "{{ ansible_default_ipv4.address }}"
+    port: "{{ k8s_api_port }}"
+    delay: 15
+    timeout: 180
   when: inventory_hostname in groups['k8s_master']
-  changed_when: "'created' in calico_apply.stdout or 'configured' in calico_apply.stdout"
+
+- name: Download Flannel manifest (master only)
+  ansible.builtin.get_url:
+    url: "{{ flannel_manifest_url }}"
+    dest: /tmp/kube-flannel.yml
+    mode: "0644"
+    force: true
+  retries: 5
+  delay: 15
+  register: flannel_download
+  until: flannel_download is succeeded
+  when: inventory_hostname in groups['k8s_master']
+
+- name: Install Flannel CNI network plugin (master only)
+  ansible.builtin.command:
+    cmd: kubectl apply -f /tmp/kube-flannel.yml
+  environment:
+    KUBECONFIG: "{{ kubeconfig_path }}"
+  register: flannel_apply
+  when: inventory_hostname in groups['k8s_master']
+  changed_when: "'created' in flannel_apply.stdout or 'configured' in flannel_apply.stdout"
 
 - name: Generate kubeadm join command (master only)
   ansible.builtin.command:
@@ -78,12 +98,13 @@
   register: kubelet_conf
   when: inventory_hostname in groups['k8s_workers']
 
-- name: Join cluster using command from master01 (workers only)
+- name: Join cluster using command from master (workers only)
   ansible.builtin.command:
-    cmd: "{{ hostvars['master01']['worker_join_command'] }}"
+    cmd: "{{ hostvars[groups['k8s_master'][0]]['worker_join_command'] }}"
   when:
     - inventory_hostname in groups['k8s_workers']
     - not kubelet_conf.stat.exists
+    - hostvars[groups['k8s_master'][0]]['worker_join_command'] is defined
   register: join_result
   changed_when: "'This node has joined the cluster' in join_result.stdout"
 
@@ -93,14 +114,11 @@
   ansible.builtin.command:
     cmd: kubectl get nodes
   environment:
-    KUBECONFIG: /home/ubuntu/.kube/config
+    KUBECONFIG: "{{ kubeconfig_path }}"
   register: nodes_output
   retries: 12
   delay: 15
-  until: >
-    'master01'    in nodes_output.stdout and
-    'worker-red'  in nodes_output.stdout and
-    'worker-blue' in nodes_output.stdout
+  until: nodes_output.stdout.count('Ready') >= groups['k8s_cluster'] | length
   when: inventory_hostname in groups['k8s_master']
   changed_when: false
 

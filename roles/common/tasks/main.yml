@@ -68,7 +68,7 @@
 
 - name: Install containerd
   ansible.builtin.apt:
-    name: "containerd={{ containerd_version }}"
+    name: containerd
     state: present
     update_cache: true
 
@@ -84,12 +84,25 @@
   args:
     creates: /etc/containerd/config.toml
 
+- name: Check if Kubernetes cluster is already running
+  ansible.builtin.stat:
+    path: /etc/kubernetes/admin.conf
+  register: k8s_already_running
+
 - name: Enable SystemdCgroup in containerd config
   ansible.builtin.replace:
     path: /etc/containerd/config.toml
     regexp: 'SystemdCgroup = false'
     replace: 'SystemdCgroup = true'
-  notify: Restart containerd
+  register: containerd_config_result
+
+- name: Restart containerd if config changed and cluster not yet initialised
+  ansible.builtin.service:
+    name: containerd
+    state: restarted
+  when:
+    - containerd_config_result.changed
+    - not k8s_already_running.stat.exists
 
 - name: Enable and start containerd
   ansible.builtin.service:

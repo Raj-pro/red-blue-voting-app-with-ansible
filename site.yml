@@ -17,7 +17,7 @@
 
 # -----------------------------------------------------------
 # Play 2 — All nodes: Build the cluster
-#           master → kubeadm init, Calico, join command
+#           master → kubeadm init, Flannel CNI, join command
 #           workers → kubeadm join
 # -----------------------------------------------------------
 - name: Build Kubernetes Cluster

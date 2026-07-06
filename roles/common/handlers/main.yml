@@ -4,11 +4,6 @@
     cmd: sysctl --system
   changed_when: false
 
-- name: Restart containerd
-  ansible.builtin.service:
-    name: containerd
-    state: restarted
-
 - name: Restart kubelet
   ansible.builtin.service:
     name: kubelet
